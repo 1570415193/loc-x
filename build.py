@@ -20,7 +20,7 @@ password=(KEYS/'password').read_text();(EXT/'p12-password.txt').write_text(passw
 run(openssl,'pkcs12','-export','-legacy','-inkey',KEYS/'server.key','-in',KEYS/'server.pem','-out',EXT/'server.p12','-passout','file:'+str(KEYS/'password'))
 run(openssl,'x509','-in',KEYS/'ca.pem','-outform','DER','-out',KEYS/'ca.der')
 plist(APP/'WLOC-Local.mobileconfig',{'PayloadType':'Configuration','PayloadVersion':1,'PayloadIdentifier':'local.wloc.certificate','PayloadUUID':str(uuid.uuid4()),'PayloadDisplayName':'WLOC 本机定位证书','PayloadDescription':'仅用于本机 WLOC 定位域名代理。移除 App 后可在设置中移除此描述文件。','PayloadContent':[{'PayloadType':'com.apple.security.root','PayloadVersion':1,'PayloadIdentifier':'local.wloc.certificate.root','PayloadUUID':str(uuid.uuid4()),'PayloadDisplayName':'WLOC Local','PayloadContent':(KEYS/'ca.der').read_bytes()}]})
-base={'CFBundleVersion':'2','CFBundleShortVersionString':'0.1.1','CFBundleDevelopmentRegion':'zh_CN','MinimumOSVersion':'15.0','CFBundleSupportedPlatforms':['iPhoneOS'],'UIDeviceFamily':[1],'LSRequiresIPhoneOS':True}
+base={'CFBundleVersion':'3','CFBundleShortVersionString':'0.1.2','CFBundleDevelopmentRegion':'zh_CN','MinimumOSVersion':'15.0','CFBundleSupportedPlatforms':['iPhoneOS'],'UIDeviceFamily':[1],'LSRequiresIPhoneOS':True}
 plist(APP/'Info.plist',dict(base,CFBundleIdentifier='local.wloc.standalone',CFBundleName='WLOC',CFBundleDisplayName='WLOC 定位',CFBundleExecutable='WLOC',CFBundlePackageType='APPL',UILaunchScreen={},UISupportedInterfaceOrientations=['UIInterfaceOrientationPortrait']))
 plist(EXT/'Info.plist',dict(base,CFBundleIdentifier='local.wloc.standalone.tunnel',CFBundleName='WLOCTunnel',CFBundleExecutable='WLOCTunnel',CFBundlePackageType='XPC!',NSExtension={'NSExtensionPointIdentifier':'com.apple.networkextension.packet-tunnel','NSExtensionPrincipalClass':'Tunnel'}))
 common=['xcrun','--sdk','iphoneos','clang','-target','arm64-apple-ios15.0','-isysroot',sdk,'-fobjc-arc','-fblocks','-O2','-I'+str(ROOT/'Vendor'),'-Wno-deprecated-declarations','-Wno-incompatible-pointer-types-discards-qualifiers']
@@ -33,7 +33,7 @@ for directory in [APP,EXT]:
  plist(BUILD/(directory.stem+'.entitlements.plist'),ent)
 for directory in [EXT,APP]:run('codesign','--force','--sign','-','--generate-entitlement-der','--entitlements',BUILD/(directory.stem+'.entitlements.plist'),directory)
 run('codesign','--verify','--deep','--strict',APP)
-out=ROOT/'WLOCStandalone-0.1.1.tipa'
+out=ROOT/'WLOCStandalone-0.1.2.tipa'
 with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
  for p in (BUILD/'Payload').rglob('*'):
   if p.is_file():z.write(p,p.relative_to(BUILD))
