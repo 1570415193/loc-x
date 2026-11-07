@@ -1,0 +1,12 @@
+build/
+build-private/
+__pycache__/
+.DS_Store
+*.ipa
+*.tipa
+*.p12
+*.key
+*.pem
+*.der
+*.mobileconfig
+*.sqlite*

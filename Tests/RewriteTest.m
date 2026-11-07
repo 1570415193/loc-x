@@ -1,0 +1,9 @@
+#import <Foundation/Foundation.h>
+#import "Proxy.h"
+@interface WLOCProxy (Test)
+- (NSData *)rewrite:(NSData *)body url:(NSString *)url headers:(NSDictionary *)headers;
+@end
+static NSArray *varint(uint64_t n){NSMutableArray *r=[NSMutableArray array];do{uint8_t b=n&127;n>>=7;[r addObject:@(b|(n?128:0))];}while(n);return r;}
+static NSArray *field(unsigned number,NSArray *b){NSMutableArray *a=[NSMutableArray arrayWithArray:varint(((uint64_t)number<<3)|2)];[a addObjectsFromArray:varint(b.count)];[a addObjectsFromArray:b];return a;}
+static NSData *fixture(int64_t lat,int64_t lon){NSMutableArray *loc=[NSMutableArray arrayWithObject:@8];[loc addObjectsFromArray:varint(lat)];[loc addObject:@16];[loc addObjectsFromArray:varint(lon)];[loc addObjectsFromArray:@[@24,@25]];NSArray *cell=field(5,loc);NSArray *body=field(22,cell);NSMutableData *d=[NSMutableData data];for(NSNumber *n in body){uint8_t b=n.unsignedCharValue;[d appendBytes:&b length:1];}return d;}
+int main(void){@autoreleasepool{for(NSArray *pair in @[@[@31.2,@121.4],@[@0,@0],@[@-12.3,@-45.6]]){double lat=[pair[0]doubleValue],lon=[pair[1]doubleValue];WLOCProxy *proxy=[[WLOCProxy alloc]initWithSettings:@{@"latitude":@(lat),@"longitude":@(lon)}];NSData *out=[proxy rewrite:fixture(1e8,2e8) url:@"https://gs-loc.apple.com/clls/wloc" headers:@{}];if(![out isEqual:fixture(llround(lat*1e8),llround(lon*1e8))]){NSLog(@"FAIL rewrite %@ status %@",pair,proxy.status);return 1;}if([proxy.status[@"patched"]intValue]!=1)return 2;}WLOCProxy *p=[[WLOCProxy alloc]initWithSettings:@{@"latitude":@30,@"longitude":@120}];NSData *invalid=[@"unrecognized payload" dataUsingEncoding:NSUTF8StringEncoding];if(![[p rewrite:invalid url:@"https://gs-loc.apple.com/clls/wloc" headers:@{}]isEqual:invalid])return 3;puts("PASS JavaScriptCore bridge: positive, zero, negative coordinates; unknown payload preserved");}return 0;}
