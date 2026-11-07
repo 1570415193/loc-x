@@ -102,4 +102,3 @@ NSString *RunRules(NSString *command, BOOL *success) {
     }
     return log;
 }
-
