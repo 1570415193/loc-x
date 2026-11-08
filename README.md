@@ -2,7 +2,7 @@
 
 ## 使用条件
 
-- iPhone 7 / iOS 15.8.5，使用 TrollStore 安装。
+- iPhone 7 / iOS 15.8.5，使用 TrollStore 安装。 【其他设备没有验证过，请自行测试】
 - 需要联网使用高德街道地图和地点搜索。首次使用时，按系统提示安装并信任证书、授权 VPN 配置。
 - 本工具通过本机 VPN 重写支持的网络定位请求，不替换 GPS，也不保证影响所有 App。
 - 普通 `.tipa` 由 TrollStore 安装；若设备上的 `Install ldid` 不可用，可在 Mac 本地生成预处理签名包。
