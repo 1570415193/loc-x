@@ -1,5 +1,7 @@
 # loc x
 
+![loc x 应用运行截图](docs/screenshots/loc-x-main.png)
+
 ## 使用条件
 
 - iPhone 7 / iOS 15.8.5，使用 TrollStore 安装。 【其他设备没有验证过，请自行测试】
