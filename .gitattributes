@@ -1,0 +1,3 @@
+# Preserve upstream Leaflet release bytes and provenance checksums.
+Resources/Map/leaflet.* -text -whitespace
+Resources/Map/LICENSE -text -whitespace
