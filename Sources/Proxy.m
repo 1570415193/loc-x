@@ -1,4 +1,7 @@
 #import "Proxy.h"
+#import "TargetSettings.h"
+#import "ControlAuth.h"
+#import <TargetConditionals.h>
 #import <Security/SecureTransport.h>
 #import <JavaScriptCore/JavaScriptCore.h>
 #include <sys/socket.h>
@@ -10,17 +13,20 @@ static OSStatus R(SSLConnectionRef c,void *b,size_t *n){ssize_t r=recv((int)(int
 static OSStatus W(SSLConnectionRef c,const void *b,size_t *n){ssize_t r=send((int)(intptr_t)c,b,*n,0);if(r>0){*n=r;return noErr;}*n=0;return errSSLClosedAbort;}
 static BOOL WriteAll(int fd,SSLContextRef ssl,NSData *d){size_t p=0;while(p<d.length){size_t n=d.length-p;OSStatus s=ssl?SSLWrite(ssl,(const char *)d.bytes+p,n,&n):W((void *)(intptr_t)fd,(const char *)d.bytes+p,&n);if(s!=noErr||!n)return NO;p+=n;}return YES;}
 static NSData *ReadSome(int fd,SSLContextRef ssl){char b[8192];size_t n=sizeof(b);OSStatus s=ssl?SSLRead(ssl,b,n,&n):R((void *)(intptr_t)fd,b,&n);if(n)return [NSData dataWithBytes:b length:n];return nil;}
-static NSDictionary *ReadRequest(int fd,SSLContextRef ssl){NSMutableData *data=[NSMutableData data];NSData *sep=[@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];NSRange end;
+static NSDictionary *ReadRequestLimited(int fd,SSLContextRef ssl,NSUInteger limit){NSMutableData *data=[NSMutableData data];NSData *sep=[@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];NSRange end;
  while((end=[data rangeOfData:sep options:0 range:NSMakeRange(0,data.length)]).location==NSNotFound){NSData *b=ReadSome(fd,ssl);if(!b||data.length+b.length>65536)return nil;[data appendData:b];}
  NSUInteger offset=NSMaxRange(end);NSString *header=[[NSString alloc]initWithData:[data subdataWithRange:NSMakeRange(0,end.location)] encoding:NSISOLatin1StringEncoding];NSArray *lines=[header componentsSeparatedByString:@"\r\n"];NSArray *first=[lines[0] componentsSeparatedByString:@" "];if(first.count!=3)return nil;NSMutableDictionary *headers=[NSMutableDictionary dictionary];
  for(NSUInteger i=1;i<lines.count;i++){NSString *l=lines[i];NSRange c=[l rangeOfString:@":"];if(c.location==NSNotFound)return nil;NSString *key=[[l substringToIndex:c.location] lowercaseString];if(headers[key])return nil;headers[key]=[[l substringFromIndex:c.location+1]stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];}
- if(headers[@"transfer-encoding"])return nil;NSString *len=headers[@"content-length"]?:@"0";NSScanner *scan=[NSScanner scannerWithString:len];long long length=0;if(![scan scanLongLong:&length]||!scan.isAtEnd||length<0||length>2*1024*1024)return nil;
+ if(headers[@"transfer-encoding"])return nil;NSString *len=headers[@"content-length"]?:@"0";NSScanner *scan=[NSScanner scannerWithString:len];long long length=0;if(![scan scanLongLong:&length]||!scan.isAtEnd||length<0||length>limit)return nil;
  while(data.length-offset<(NSUInteger)length){NSData *b=ReadSome(fd,ssl);if(!b)return nil;[data appendData:b];}
  return @{@"method":first[0],@"target":first[1],@"headers":headers,@"body":[data subdataWithRange:NSMakeRange(offset,(NSUInteger)length)]};}
+static NSDictionary *ReadRequest(int fd,SSLContextRef ssl){return ReadRequestLimited(fd,ssl,2*1024*1024);}
 @interface WLOCProxy () <NSURLSessionTaskDelegate>
 @property NSDictionary *settings;
 @property NSArray *certificates;
-@property int listener;
+@property int listener,controlListener;
+@property NSUInteger revision;
+@property NSMutableDictionary<NSString *,NSNumber *> *controlNonces;
 @property BOOL stopped;
 @property dispatch_queue_t queue;
 @property dispatch_semaphore_t slots;
@@ -29,26 +35,37 @@ static NSDictionary *ReadRequest(int fd,SSLContextRef ssl){NSMutableData *data=[
 @property NSString *last;
 @end
 @implementation WLOCProxy
-- (instancetype)initWithSettings:(NSDictionary *)s{if((self=[super init])){_settings=s;_listener=-1;_clients=[NSMutableSet set];_last=@"尚无请求";_queue=dispatch_queue_create("wloc.proxy",DISPATCH_QUEUE_CONCURRENT);_slots=dispatch_semaphore_create(3);}return self;}
+- (instancetype)initWithSettings:(NSDictionary *)s{if((self=[super init])){_settings=s;_controlNonces=[NSMutableDictionary dictionary];_listener=-1;_controlListener=-1;_clients=[NSMutableSet set];_last=@"尚无请求";_queue=dispatch_queue_create("wloc.proxy",DISPATCH_QUEUE_CONCURRENT);_slots=dispatch_semaphore_create(3);}return self;}
 - (void)note:(NSString *)s failed:(BOOL)failed{@synchronized(self){self.last=s;if(failed)self.failures++;}}
-- (NSDictionary *)status{@synchronized(self){return @{@"requests":@(self.requests),@"patched":@(self.patched),@"failures":@(self.failures),@"last":self.last?:@""};}}
+- (NSDictionary *)status{@synchronized(self){return @{@"controlAPI":@1,@"ready":@(self.ready),@"revision":@(self.revision),@"sequence":@(self.controlSequence),@"target":self.settings?:@{},@"requests":@(self.requests),@"patched":@(self.patched),@"failures":@(self.failures),@"last":self.last?:@""};}}
 - (BOOL)start:(NSError **)error{
- NSData *p12=[NSData dataWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"server" ofType:@"p12"]];NSString *password=[NSString stringWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"p12-password" ofType:@"txt"] encoding:NSUTF8StringEncoding error:nil];CFArrayRef items=NULL;OSStatus status=SecPKCS12Import((__bridge CFDataRef)p12,(__bridge CFDictionaryRef)@{(__bridge id)kSecImportExportPassphrase:password?:@""},&items);
+ if(!WLOCValidatedControlToken(self.controlToken)){if(error)*error=[NSError errorWithDomain:@"WLOC control token" code:401 userInfo:nil];return NO;}
+ NSData *p12=[NSData dataWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"server" ofType:@"p12"]];NSString *password=[NSString stringWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"p12-password" ofType:@"txt"] encoding:NSUTF8StringEncoding error:nil];CFArrayRef items=NULL;NSMutableDictionary *importOptions=[@{(__bridge id)kSecImportExportPassphrase:password?:@""}mutableCopy];
+#if TARGET_OS_OSX
+ if(@available(macOS 15.0,*))importOptions[(__bridge id)kSecImportToMemoryOnly]=@YES;
+#endif
+ OSStatus status=SecPKCS12Import((__bridge CFDataRef)p12,(__bridge CFDictionaryRef)importOptions,&items);
  if(status!=errSecSuccess){if(error)*error=[NSError errorWithDomain:@"WLOC TLS identity" code:status userInfo:nil];return NO;}NSArray *a=CFBridgingRelease(items);NSDictionary *item=a.firstObject;SecIdentityRef identity=(__bridge SecIdentityRef)item[(__bridge id)kSecImportItemIdentity];SecCertificateRef leaf=NULL;SecIdentityCopyCertificate(identity,&leaf);self.certificates=@[(__bridge id)identity];if(leaf)CFRelease(leaf);
  int fd=socket(AF_INET,SOCK_STREAM,0);int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));struct sockaddr_in address={.sin_len=sizeof(address),.sin_family=AF_INET,.sin_port=htons(8877),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
  if(fd<0||bind(fd,(void *)&address,sizeof(address))||listen(fd,8)){int code=errno;if(fd>=0)close(fd);if(error)*error=[NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:nil];return NO;}self.listener=fd;
- dispatch_async(self.queue,^{while(!self.stopped){int c=accept(fd,NULL,NULL);if(c<0)break;if(dispatch_semaphore_wait(self.slots,DISPATCH_TIME_NOW)!=0){close(c);continue;}struct timeval tv={20,0};setsockopt(c,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));setsockopt(c,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));setsockopt(c,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));@synchronized(self){[self.clients addObject:@(c)];}dispatch_async(self.queue,^{@autoreleasepool{[self handle:c];@synchronized(self){[self.clients removeObject:@(c)];}close(c);dispatch_semaphore_signal(self.slots);}});}});return YES;
+ int control=socket(AF_INET,SOCK_STREAM,0);setsockopt(control,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));address.sin_port=htons(8878);if(control<0||bind(control,(void *)&address,sizeof(address))||listen(control,4)){int code=errno;if(control>=0)close(control);close(fd);self.listener=-1;if(error)*error=[NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:nil];return NO;}self.controlListener=control;dispatch_semaphore_t controlSlots=dispatch_semaphore_create(2);
+ for(NSNumber *number in @[@(fd),@(control)]){int server=number.intValue;BOOL isControl=server==control;dispatch_async(self.queue,^{while(!self.stopped){int c=accept(server,NULL,NULL);if(c<0)break;dispatch_semaphore_t slots=isControl?controlSlots:self.slots;if(dispatch_semaphore_wait(slots,DISPATCH_TIME_NOW)!=0){close(c);continue;}struct timeval tv={isControl?3:20,0};setsockopt(c,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));setsockopt(c,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));setsockopt(c,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));@synchronized(self){[self.clients addObject:@(c)];}dispatch_async(self.queue,^{@autoreleasepool{if(isControl)[self handleControl:c];else [self handle:c];@synchronized(self){[self.clients removeObject:@(c)];}close(c);dispatch_semaphore_signal(slots);}});}});}
+ return YES;
 }
-- (BOOL)updateSettings:(NSDictionary *)settings{
- double lat=[settings[@"latitude"]doubleValue],lon=[settings[@"longitude"]doubleValue];if(![settings[@"latitude"]isKindOfClass:NSNumber.class]||![settings[@"longitude"]isKindOfClass:NSNumber.class]||!isfinite(lat)||!isfinite(lon)||fabs(lat)>90||fabs(lon)>180)return NO;self.settings=[settings copy];[self note:@"目标已更新，等待下一次网络定位请求" failed:NO];return YES;
+- (BOOL)updateSettings:(NSDictionary *)settings{NSDictionary *target=WLOCValidatedTarget(settings);if(!target)return NO;@synchronized(self){if(![self.settings isEqualToDictionary:target]){self.settings=target;self.revision++;self.requests=0;self.patched=0;self.failures=0;}self.last=@"目标已更新，等待下一次网络定位请求";}if(self.targetDidChange)self.targetDidChange(target);return YES;}
+- (void)handleControl:(int)fd{
+ NSDictionary *request=ReadRequestLimited(fd,NULL,4096);NSString *nonce=request[@"headers"][@"x-wloc-nonce"],*stamp=request[@"headers"][@"x-wloc-time"],*provided=request[@"headers"][@"x-wloc-mac"];NSData *payload=request[@"body"]?:NSData.data;BOOL authenticated=nonce.length==32&&stamp.length>0&&stamp.length<16&&[stamp rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location==NSNotFound&&fabs(NSDate.date.timeIntervalSince1970-stamp.longLongValue)<=30&&WLOCEqualMAC(provided,WLOCControlMAC(self.controlToken?:@"",[NSString stringWithFormat:@"WLOC-Request\n%@\n%@\n",nonce,stamp],payload));
+ if(authenticated){@synchronized(self){for(NSString *old in self.controlNonces.allKeys)if(NSDate.date.timeIntervalSince1970-self.controlNonces[old].doubleValue>60)[self.controlNonces removeObjectForKey:old];if(self.controlNonces[nonce])authenticated=NO;else self.controlNonces[nonce]=@(NSDate.date.timeIntervalSince1970);}}
+ NSInteger code=200;NSDictionary *reply=nil;if(![request[@"method"]isEqual:@"POST"]||![request[@"target"]isEqual:@"/wloc/control"])code=404;else if(!authenticated)code=401;else {id value=[NSJSONSerialization JSONObjectWithData:request[@"body"] options:0 error:nil];if(![value isKindOfClass:NSDictionary.class])code=400;else if([value[@"action"]isEqual:@"status"])reply=self.status;else if([value[@"action"]isEqual:@"target"]){@synchronized(self){BOOL validSequence=[value[@"sequence"]isKindOfClass:NSNumber.class];unsigned long long sequence=validSequence?[value[@"sequence"]unsignedLongLongValue]:0;if(!validSequence||sequence<=self.controlSequence)code=409;else if([self updateSettings:value[@"target"]]){self.controlSequence=sequence;if(self.sequenceDidChange)self.sequenceDidChange(@(sequence));NSMutableDictionary *updated=[self.status mutableCopy];updated[@"updated"]=@YES;reply=updated;}else code=400;}}else code=400;}
+ NSData *body=reply?[NSJSONSerialization dataWithJSONObject:reply options:0 error:nil]:NSData.data;NSString *header=[NSString stringWithFormat:@"HTTP/1.1 %ld Control\r\nContent-Type: application/json\r\nX-WLOC-MAC: %@\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",(long)code,WLOCControlMAC(self.controlToken?:@"",[NSString stringWithFormat:@"WLOC-Response\n%@\n%ld\n",nonce?:@"",(long)code],body),(unsigned long)body.length];WriteAll(fd,NULL,[header dataUsingEncoding:NSUTF8StringEncoding]);WriteAll(fd,NULL,body);
 }
-- (void)stop{self.stopped=YES;if(self.listener>=0){shutdown(self.listener,SHUT_RDWR);close(self.listener);self.listener=-1;}@synchronized(self){for(NSNumber *n in self.clients)shutdown(n.intValue,SHUT_RDWR);}}
+- (void)stop{self.stopped=YES;self.ready=NO;if(self.controlListener>=0){shutdown(self.controlListener,SHUT_RDWR);close(self.controlListener);self.controlListener=-1;}if(self.listener>=0){shutdown(self.listener,SHUT_RDWR);close(self.listener);self.listener=-1;}@synchronized(self){for(NSNumber *n in self.clients)shutdown(n.intValue,SHUT_RDWR);}}
 - (NSData *)rewrite:(NSData *)body url:(NSString *)url headers:(NSDictionary *)headers{
- NSDictionary *target=self.settings;JSContext *ctx=[JSContext new];__block NSString *exception=nil;ctx.exceptionHandler=^(JSContext *c,JSValue *e){exception=e.toString;};ctx[@"console"]=@{@"log":^(NSString *s){[self note:s failed:NO];}};ctx[@"$script"]=@{@"startTime":@([NSDate date].timeIntervalSince1970)};ctx[@"$environment"]=@{@"surge-version":@"WLOCStandalone"};ctx[@"$argument"]=[NSString stringWithFormat:@"longitude=%.8f&latitude=%.8f&accuracy=25&logLevel=info",[target[@"longitude"]doubleValue],[target[@"latitude"]doubleValue]];ctx[@"$persistentStore"]=@{@"read":^id(NSString *key){return (id)nil;}};ctx[@"$request"]=@{@"url":url};
+ NSDictionary *target=nil;NSUInteger revision=0;@synchronized(self){target=self.settings;revision=self.revision;}JSContext *ctx=[JSContext new];__block NSString *exception=nil;ctx.exceptionHandler=^(JSContext *c,JSValue *e){exception=e.toString;};ctx[@"console"]=@{@"log":^(NSString *s){[self note:s failed:NO];}};ctx[@"$script"]=@{@"startTime":@([NSDate date].timeIntervalSince1970)};ctx[@"$environment"]=@{@"surge-version":@"WLOCStandalone"};ctx[@"$argument"]=[NSString stringWithFormat:@"longitude=%.8f&latitude=%.8f&accuracy=25&logLevel=info",[target[@"longitude"]doubleValue],[target[@"latitude"]doubleValue]];ctx[@"$persistentStore"]=@{@"read":^id(NSString *key){return (id)nil;}};ctx[@"$request"]=@{@"url":url};
  NSMutableArray *bytes=[NSMutableArray arrayWithCapacity:body.length];const uint8_t *raw=body.bytes;for(NSUInteger i=0;i<body.length;i++)[bytes addObject:@(raw[i])];ctx[@"$response"]=@{@"bodyBytes":bytes,@"headers":headers,@"status":@200};__block NSData *result=nil;__block BOOL done=NO;
  ctx[@"$done"]=^(JSValue *value){JSValue *response=value[@"response"];if(response.isUndefined)response=value;JSValue *b=response[@"bodyBytes"];if(!b.isUndefined){NSUInteger length=[b[@"length"]toUInt32];if(length<=2*1024*1024){NSMutableData *out=[NSMutableData dataWithLength:length];uint8_t *p=out.mutableBytes;for(NSUInteger i=0;i<length;i++)p[i]=(uint8_t)[b[i]toUInt32];result=out;}}done=YES;};
  NSString *script=[NSString stringWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"wloc" ofType:@"js"] encoding:NSUTF8StringEncoding error:nil];[ctx evaluateScript:script];NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:3];while(!done&&!exception&&deadline.timeIntervalSinceNow>0)[NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.01]];
- if(exception||!done||!result){[self note:exception?:@"wloc 脚本未完成，保留原响应" failed:YES];return body;}if(![result isEqualToData:body]){@synchronized(self){self.patched++;}}return result;
+ if(exception||!done||!result){[self note:exception?:@"wloc 脚本未完成，保留原响应" failed:YES];return body;}if(![result isEqualToData:body]){@synchronized(self){if(revision==self.revision)self.patched++;}}return result;
 }
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest *))completionHandler{completionHandler(nil);}
 - (void)handle:(int)fd{

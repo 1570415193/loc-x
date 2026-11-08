@@ -1,0 +1,19 @@
+{
+  "source": "https://github.com/Leaflet/Leaflet/releases/download/v1.9.4/leaflet.zip",
+  "version": "1.9.4",
+  "files": {
+    "leaflet.js": "85d455b4522415f6badc42a0e7d17c919d100347d6b8958bd0dc738fdecd6d50",
+    "leaflet.css": "a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6",
+    "LICENSE": "53e8dc25862014e4324741ca18fbe3611e11d42ef69f59f86ea8c5389647d4cb",
+    "sources.json": "75bf1990a719ff944b2aa5c0f1961e4292df8908fc4689f7a95fe971c206c659",
+    "sources.js": "fc92483a0c95e49279e4a8538620f9dee637316d1472ca28dfcf1c4b0e2c2dc8",
+    "gcj.js": "e448c1f103a615f53487c195c3adf57c054df2f437337f60bf87beceafc0b4f3",
+    "map.js": "0750bbe091d88113a979a503766ce35c073464f920732b0ca2747a0b7855347d",
+    "WLOC-LICENSE": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef"
+  },
+  "wloc_map_source": "https://github.com/Yu9191/wloc/blob/main/worker/src/page.js",
+  "gcj_source": "https://github.com/Yu9191/wloc/blob/main/worker/src/gcj-browser.js",
+  "map_license": "AGPL-3.0, see WLOC-LICENSE",
+  "source_checked_date": "2026-11-08",
+  "map_change": "0.3.2: only AMap street tiles (style=7); foreground system location is a separate blue marker and does not change the selected WGS84 target"
+}

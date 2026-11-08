@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import pathlib,subprocess,plistlib,os,secrets,uuid,zipfile,hashlib
+import pathlib,subprocess,plistlib,os,secrets,uuid,zipfile,hashlib,json
 ROOT=pathlib.Path(__file__).resolve().parent
 BUILD=ROOT/'build';APP=BUILD/'Payload/WLOC.app';EXT=APP/'PlugIns/WLOCTunnel.appex';KEYS=pathlib.Path(os.environ.get('WLOC_KEYS_DIR', str(ROOT/'build-private')))
 for p in [APP,EXT,KEYS]:p.mkdir(parents=True,exist_ok=True)
@@ -19,12 +19,25 @@ for p in KEYS.iterdir():os.chmod(p,0o600)
 password=(KEYS/'password').read_text();(EXT/'p12-password.txt').write_text(password)
 run(openssl,'pkcs12','-export','-legacy','-inkey',KEYS/'server.key','-in',KEYS/'server.pem','-out',EXT/'server.p12','-passout','file:'+str(KEYS/'password'))
 run(openssl,'x509','-in',KEYS/'ca.pem','-outform','DER','-out',KEYS/'ca.der')
+run(openssl,'x509','-in',KEYS/'server.pem','-outform','DER','-out',APP/'server.der')
 plist(APP/'WLOC-Local.mobileconfig',{'PayloadType':'Configuration','PayloadVersion':1,'PayloadIdentifier':'local.wloc.certificate','PayloadUUID':str(uuid.uuid4()),'PayloadDisplayName':'WLOC 本机定位证书','PayloadDescription':'仅用于本机 WLOC 定位域名代理。移除 App 后可在设置中移除此描述文件。','PayloadContent':[{'PayloadType':'com.apple.security.root','PayloadVersion':1,'PayloadIdentifier':'local.wloc.certificate.root','PayloadUUID':str(uuid.uuid4()),'PayloadDisplayName':'WLOC Local','PayloadContent':(KEYS/'ca.der').read_bytes()}]})
-base={'CFBundleVersion':'3','CFBundleShortVersionString':'0.1.2','CFBundleDevelopmentRegion':'zh_CN','MinimumOSVersion':'15.0','CFBundleSupportedPlatforms':['iPhoneOS'],'UIDeviceFamily':[1],'LSRequiresIPhoneOS':True}
-plist(APP/'Info.plist',dict(base,CFBundleIdentifier='local.wloc.standalone',CFBundleName='WLOC',CFBundleDisplayName='WLOC 定位',CFBundleExecutable='WLOC',CFBundlePackageType='APPL',UILaunchScreen={},UISupportedInterfaceOrientations=['UIInterfaceOrientationPortrait']))
+import shutil
+sources=ROOT/'Resources/Map/sources.json'
+(ROOT/'Resources/Map/sources.js').write_text('const MAP_SOURCES = '+sources.read_text().strip()+';\n')
+shutil.copytree(ROOT/'Resources/Map',APP/'Map',dirs_exist_ok=True)
+assets=BUILD/'Assets.xcassets';assets.mkdir(exist_ok=True)
+plist_path=BUILD/'icon-info.plist'
+if os.environ.get('WLOC_REUSE_ICON')=='1':
+ assert plist_path.exists() and (APP/'Assets.car').exists() and (APP/'AppIcon60x60@2x.png').exists(), 'Existing compiled icon resources are required'
+else:
+ run('swift',ROOT/'build_icon.swift',assets/'AppIcon.appiconset')
+ run('xcrun','actool',assets,'--compile',APP,'--platform','iphoneos','--minimum-deployment-target','15.0','--target-device','iphone','--app-icon','AppIcon','--output-partial-info-plist',plist_path)
+icon_info=plistlib.loads(plist_path.read_bytes())
+base={'CFBundleVersion':'11','CFBundleShortVersionString':'0.3.6','CFBundleDevelopmentRegion':'zh_CN','MinimumOSVersion':'15.0','CFBundleSupportedPlatforms':['iPhoneOS'],'UIDeviceFamily':[1],'LSRequiresIPhoneOS':True}
+plist(APP/'Info.plist',dict(base,**icon_info,CFBundleIdentifier='local.wloc.standalone',CFBundleName='loc x',CFBundleDisplayName='loc x',CFBundleExecutable='WLOC',CFBundlePackageType='APPL',UILaunchScreen={},NSLocationWhenInUseUsageDescription='点击当前位置时读取系统位置并在地图标记；不会自动修改所选目标或启用代理。',UISupportedInterfaceOrientations=['UIInterfaceOrientationPortrait']))
 plist(EXT/'Info.plist',dict(base,CFBundleIdentifier='local.wloc.standalone.tunnel',CFBundleName='WLOCTunnel',CFBundleExecutable='WLOCTunnel',CFBundlePackageType='XPC!',NSExtension={'NSExtensionPointIdentifier':'com.apple.networkextension.packet-tunnel','NSExtensionPrincipalClass':'Tunnel'}))
 common=['xcrun','--sdk','iphoneos','clang','-target','arm64-apple-ios15.0','-isysroot',sdk,'-fobjc-arc','-fblocks','-O2','-I'+str(ROOT/'Vendor'),'-Wno-deprecated-declarations','-Wno-incompatible-pointer-types-discards-qualifiers']
-run(*common,ROOT/'Sources/App.m',ROOT/'Sources/RulesBridge.m',ROOT/'Vendor/rules.c','-framework','UIKit','-framework','MapKit','-framework','NetworkExtension','-framework','Security','-lsqlite3','-o',APP/'WLOC')
+run(*common,ROOT/'Sources/App.m',ROOT/'Sources/LocalControl.m',ROOT/'Sources/MapPanel.m',ROOT/'Sources/RulesBridge.m',ROOT/'Vendor/rules.c','-framework','UIKit','-framework','WebKit','-framework','MapKit','-framework','CoreGraphics','-framework','CoreLocation','-framework','NetworkExtension','-framework','Security','-lsqlite3','-o',APP/'WLOC')
 run(*common,ROOT/'Sources/Tunnel.m',ROOT/'Sources/Proxy.m','-fapplication-extension','-framework','Foundation','-framework','NetworkExtension','-framework','Security','-framework','JavaScriptCore','-framework','CFNetwork','-e','_NSExtensionMain','-o',EXT/'WLOCTunnel')
 (EXT/'wloc.js').write_bytes((ROOT/'Vendor/wloc.js').read_bytes())
 for directory in [APP,EXT]:
@@ -33,7 +46,7 @@ for directory in [APP,EXT]:
  plist(BUILD/(directory.stem+'.entitlements.plist'),ent)
 for directory in [EXT,APP]:run('codesign','--force','--sign','-','--generate-entitlement-der','--entitlements',BUILD/(directory.stem+'.entitlements.plist'),directory)
 run('codesign','--verify','--deep','--strict',APP)
-out=ROOT/'WLOCStandalone-0.1.2.tipa'
+out=ROOT/'loc-x-0.3.6.tipa'
 with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
  for p in (BUILD/'Payload').rglob('*'):
   if p.is_file():z.write(p,p.relative_to(BUILD))
